@@ -1,0 +1,336 @@
+# Deploy ALTCHA Sentinel to AWS
+#
+# =Components=
+#
+# - ECS Fargate Service
+# - ALB Application Load Balancer
+# - VPC with public subnets
+# - EFS storage
+#
+# =Usage=
+# aws cloudformation deploy \
+#   --template-file altcha-sentinel-aws-ecs.yml \
+#   --stack-name altcha-sentinel-stack \
+#   --capabilities CAPABILITY_IAM \
+#   --parameter-overrides \
+#       DomainName=your.domain.com \
+#       CertificateArn=arn:aws:acm:region:account:certificate/id
+#
+# =Delete stack=
+#
+# aws cloudformation delete-stack --stack-name altcha-sentinel-stack
+#
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Fargate ARM64 Service with HTTPS ALB
+
+Parameters:
+  ImageURI:
+    Type: String
+    Default: "public.ecr.aws/n6m6b4n8/altcha-org/sentinel:1.1.0"
+    Description: Container image URI 
+  ServiceName:
+    Type: String
+    Default: "altcha-sentinel"
+  DomainName:
+    Type: String
+    Default: ""
+    Description: (Optional) Your domain name (e.g., example.com)
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: (Optional) ACM certificate ARN (e.g., arn:aws:acm:...)
+  TaskCPU:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["1024", "2048", "4096"]
+    Description: CPU units for the task (1024 = 1 vCPU)
+  TaskMemory:
+    Type: String
+    Default: "4096"
+    AllowedValues: ["2048", "3072", "4096", "5120", "6144", "7168", "8192", "16384"]
+    Description: Memory in MiB (must be compatible with CPU choice)
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Resources:
+  # --- Networking ---
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  # --- ALB with HTTPS ---
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS/HTTP inbound to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ServiceName}-alb"
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ServiceName}-tg"
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckPort: "8080"
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # EFS File System
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${ServiceName}-efs"
+
+  # Mount Targets (one per subnet)
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  # EFS Access Point (for fine-grained permissions)
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: "/data"
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "755"
+
+  # Security Group for EFS
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow NFS traffic from ECS tasks"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049 
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  # --- ECS ---
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ServiceName}-cluster"
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EFS-Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "elasticfilesystem:ClientMount"
+                  - "elasticfilesystem:ClientWrite"
+                Resource: !GetAtt EFSFileSystem.Arn
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ServiceName}-task"
+      NetworkMode: awsvpc
+      Volumes:
+        - Name: efs-volume
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              IAM: ENABLED
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      Cpu: !Ref TaskCPU
+      Memory: !Ref TaskMemory
+      RuntimePlatform:
+        CpuArchitecture: arm64
+        OperatingSystemFamily: LINUX
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: !Sub "${ServiceName}-container"
+          Image: !Ref ImageURI
+          PortMappings:
+            - ContainerPort: 8080
+          MountPoints:
+            - SourceVolume: efs-volume
+              ContainerPath: /data
+          Essential: true
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB to port 8080
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPListener
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref TaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup
+          ContainerName: !Sub "${ServiceName}-container"
+          ContainerPort: 8080
+
+Outputs:
+  ALBDNSName:
+    Description: "ALB DNS Name"
+    Value: !GetAtt LoadBalancer.DNSName
+  ServiceURL:
+    Description: "Service URL"
+    Value: !If 
+      - HasCustomDomain
+      - !Sub "https://${DomainName}"
+      - !Sub "http://${LoadBalancer.DNSName}"
+  TaskSize:
+    Description: "Configured Task Size"
+    Value: !Sub "${TaskCPU} CPU units (${TaskMemory} MB RAM)"
