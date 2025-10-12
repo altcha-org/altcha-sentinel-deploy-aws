@@ -27,7 +27,7 @@ Description: ECS Fargate ARM64 Service with HTTPS ALB
 Parameters:
   ImageURI:
     Type: String
-    Default: "public.ecr.aws/n6m6b4n8/altcha-org/sentinel:1.13.0"
+    Default: "public.ecr.aws/n6m6b4n8/altcha-org/sentinel:1.13.1"
     Description: Container image URI 
   ServiceName:
     Type: String
