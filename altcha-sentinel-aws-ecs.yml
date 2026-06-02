@@ -40,6 +40,11 @@ Parameters:
     Type: String
     Default: ""
     Description: (Optional) ACM certificate ARN (e.g., arn:aws:acm:...)
+  CpuArchitecture:
+    Type: String
+    Default: "ARM64"
+    AllowedValues: ["X86_64", "ARM64"]
+    Description: CPU architecture for Fargate tasks
   TaskCPU:
     Type: String
     Default: "2048"
@@ -206,14 +211,11 @@ Resources:
     Type: AWS::EFS::AccessPoint
     Properties:
       FileSystemId: !Ref EFSFileSystem
-      PosixUser:
-        Uid: "1000"
-        Gid: "1000"
       RootDirectory:
         Path: "/data"
         CreationInfo:
-          OwnerUid: "1000"
-          OwnerGid: "1000"
+          OwnerUid: "1001"
+          OwnerGid: "1001"
           Permissions: "755"
 
   # Security Group for EFS
@@ -274,7 +276,7 @@ Resources:
       Cpu: !Ref TaskCPU
       Memory: !Ref TaskMemory
       RuntimePlatform:
-        CpuArchitecture: arm64
+        CpuArchitecture: !Ref CpuArchitecture
         OperatingSystemFamily: LINUX
       RequiresCompatibilities:
         - FARGATE
@@ -287,6 +289,12 @@ Resources:
             - SourceVolume: efs-volume
               ContainerPath: /data
           Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub "/ecs/${ServiceName}"
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
 
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
