@@ -266,7 +266,7 @@ Resources:
       Volumes:
         - Name: efs-volume
           EFSVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystem
+            FilesystemId: !Ref EFSFileSystem
             TransitEncryption: ENABLED
             AuthorizationConfig:
               AccessPointId: !Ref EFSAccessPoint
@@ -295,6 +295,7 @@ Resources:
               awslogs-group: !Sub "/ecs/${ServiceName}"
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
+              awslogs-create-group: "true"
 
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
