@@ -5,7 +5,7 @@
 # - ECS Fargate Service
 # - ALB Application Load Balancer
 # - VPC with public subnets
-# - EFS storage
+# - (Optional) EFS storage for local persistence (e.g. SQLite), mounted at /data
 #
 # =Usage=
 # aws cloudformation deploy \
@@ -15,6 +15,18 @@
 #   --parameter-overrides \
 #       DomainName=your.domain.com \
 #       CertificateArn=arn:aws:acm:region:account:certificate/id
+#
+# =Enable local persistent storage=
+# By default no volume is attached (recommended when using an external
+# database). This deployment only supports a single running task
+# (DesiredCount: 1), so if you're using a local, file-based database (e.g.
+# SQLite) instead of an external one, enable an EFS-backed /data volume so
+# it survives task recreation across deployments/restarts:
+# aws cloudformation deploy \
+#   --template-file altcha-sentinel-aws-ecs.yml \
+#   --stack-name altcha-sentinel-stack \
+#   --capabilities CAPABILITY_IAM \
+#   --parameter-overrides EnablePersistence=true
 #
 # =Delete stack=
 #
@@ -55,10 +67,23 @@ Parameters:
     Default: "4096"
     AllowedValues: ["2048", "3072", "4096", "5120", "6144", "7168", "8192", "16384"]
     Description: Memory in MiB (must be compatible with CPU choice)
+  EnablePersistence:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Attach an EFS-backed volume (mounted at /data) that persists across
+      task recreation - deployments, scaling events, crashes. Leave disabled
+      (the default) when using an external database, since no local storage
+      is required in that case. Only intended for a single running task
+      (DesiredCount: 1); when enabled, deployments are switched to a
+      recreate strategy (old task stopped before the new one starts) so two
+      tasks never write to the volume at the same time.
 
 Conditions:
   HasCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  PersistenceEnabled: !Equals [!Ref EnablePersistence, "true"]
 
 Resources:
   # --- Networking ---
@@ -178,9 +203,13 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-  # EFS File System
+  # EFS File System (only created when persistence is enabled). Unlike a
+  # per-task EBS volume, EFS exists independently of any task's lifecycle,
+  # so /data survives task recreation - which a single-instance, file-based
+  # database (e.g. SQLite) deployment needs.
   EFSFileSystem:
     Type: AWS::EFS::FileSystem
+    Condition: PersistenceEnabled
     Properties:
       PerformanceMode: generalPurpose
       ThroughputMode: bursting
@@ -192,6 +221,7 @@ Resources:
   # Mount Targets (one per subnet)
   MountTarget1:
     Type: AWS::EFS::MountTarget
+    Condition: PersistenceEnabled
     Properties:
       FileSystemId: !Ref EFSFileSystem
       SubnetId: !Ref PublicSubnet1
@@ -200,6 +230,7 @@ Resources:
 
   MountTarget2:
     Type: AWS::EFS::MountTarget
+    Condition: PersistenceEnabled
     Properties:
       FileSystemId: !Ref EFSFileSystem
       SubnetId: !Ref PublicSubnet2
@@ -209,6 +240,7 @@ Resources:
   # EFS Access Point (for fine-grained permissions)
   EFSAccessPoint:
     Type: AWS::EFS::AccessPoint
+    Condition: PersistenceEnabled
     Properties:
       FileSystemId: !Ref EFSFileSystem
       RootDirectory:
@@ -221,12 +253,13 @@ Resources:
   # Security Group for EFS
   EFSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: PersistenceEnabled
     Properties:
       GroupDescription: "Allow NFS traffic from ECS tasks"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 2049 
+          FromPort: 2049
           ToPort: 2049
           SourceSecurityGroupId: !Ref ECSSecurityGroup
 
@@ -245,16 +278,18 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: EFS-Access
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - "elasticfilesystem:ClientMount"
-                  - "elasticfilesystem:ClientWrite"
-                Resource: !GetAtt EFSFileSystem.Arn
+      Policies: !If
+        - PersistenceEnabled
+        - - PolicyName: EFS-Access
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "elasticfilesystem:ClientMount"
+                    - "elasticfilesystem:ClientWrite"
+                  Resource: !GetAtt EFSFileSystem.Arn
+        - !Ref AWS::NoValue
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
@@ -263,14 +298,16 @@ Resources:
     Properties:
       Family: !Sub "${ServiceName}-task"
       NetworkMode: awsvpc
-      Volumes:
-        - Name: efs-volume
-          EFSVolumeConfiguration:
-            FilesystemId: !Ref EFSFileSystem
-            TransitEncryption: ENABLED
-            AuthorizationConfig:
-              AccessPointId: !Ref EFSAccessPoint
-              IAM: ENABLED
+      Volumes: !If
+        - PersistenceEnabled
+        - - Name: efs-volume
+            EFSVolumeConfiguration:
+              FilesystemId: !Ref EFSFileSystem
+              TransitEncryption: ENABLED
+              AuthorizationConfig:
+                AccessPointId: !Ref EFSAccessPoint
+                IAM: ENABLED
+        - !Ref AWS::NoValue
       ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
       TaskRoleArn: !GetAtt ECSTaskExecutionRole.Arn
       Cpu: !Ref TaskCPU
@@ -285,9 +322,11 @@ Resources:
           Image: !Ref ImageURI
           PortMappings:
             - ContainerPort: 8080
-          MountPoints:
-            - SourceVolume: efs-volume
-              ContainerPath: /data
+          MountPoints: !If
+            - PersistenceEnabled
+            - - SourceVolume: efs-volume
+                ContainerPath: /data
+            - !Ref AWS::NoValue
           Essential: true
           LogConfiguration:
             LogDriver: awslogs
@@ -317,6 +356,11 @@ Resources:
       LaunchType: FARGATE
       DesiredCount: 1
       TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration: !If
+        - PersistenceEnabled
+        - MinimumHealthyPercent: 0
+          MaximumPercent: 100
+        - !Ref AWS::NoValue
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
@@ -343,3 +387,9 @@ Outputs:
   TaskSize:
     Description: "Configured Task Size"
     Value: !Sub "${TaskCPU} CPU units (${TaskMemory} MB RAM)"
+  Persistence:
+    Description: "/data volume status"
+    Value: !If
+      - PersistenceEnabled
+      - "Enabled - EFS volume mounted at /data, survives task recreation"
+      - "Disabled - no volume attached"

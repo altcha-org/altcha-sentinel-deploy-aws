@@ -8,7 +8,7 @@ The template creates the following AWS resources:
 - **ECS Fargate Service** running on ARM64 architecture
 - **Application Load Balancer** with HTTPS support (when certificate provided)
 - **VPC with public subnets** across two Availability Zones
-- **EFS storage** mounted to the container at `/data`
+- **(Optional) EFS storage** mounted to the container at `/data`
 - **All required IAM roles and security groups**
 
 ## Prerequisites
@@ -47,6 +47,7 @@ aws cloudformation deploy \
 | `CertificateArn` | (empty) | ACM certificate ARN for HTTPS |
 | `TaskCPU` | `2048` | CPU units (1024 = 1 vCPU) |
 | `TaskMemory` | `4096` | Memory in MiB |
+| `EnablePersistence` | `false` | Attach an EFS-backed volume (at `/data`) that survives task recreation |
 
 ## Available Task Sizes
 
@@ -77,7 +78,31 @@ The output will display the service URL.
 
 ## Storage
 
-The deployment includes an EFS volume mounted at `/data` in the container with encryption enabled.
+By default, no volume is attached and the container relies on its local, ephemeral task storage.
+This is the recommended setting when ALTCHA Sentinel is configured with an external database, since
+no local persistence is needed in that case.
+
+This template always runs a single task (`DesiredCount: 1`). If you're instead using a local,
+file-based database (e.g. SQLite), deploy with `EnablePersistence=true` to mount an encrypted EFS
+volume at `/data`:
+
+```bash
+aws cloudformation deploy \
+  --template-file altcha-sentinel-aws-ecs.yml \
+  --stack-name altcha-sentinel-stack \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides EnablePersistence=true
+```
+
+Unlike a per-task volume, EFS exists independently of any task's lifecycle, so `/data` survives
+task recreation — deployments, scaling events, and crash restarts. When persistence is enabled, the
+service also switches to a "recreate" deployment strategy (the running task is stopped before its
+replacement starts) so two tasks never mount the volume and write to a local database file at the
+same time.
+
+This setup assumes a single task. Scaling `DesiredCount` beyond 1 would have every task share the
+same EFS mount and directory, which is unsafe for a local file-based database — use an external
+database instead if you need to run more than one task.
 
 ## Cleaning Up
 
