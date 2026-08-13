@@ -80,10 +80,82 @@ Parameters:
       recreate strategy (old task stopped before the new one starts) so two
       tasks never write to the volume at the same time.
 
+  # --- External database (see https://altcha.org/docs/v2/sentinel/advanced/env/) ---
+  DatabaseUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      (Optional) Connection string for an external database. Leave empty to
+      use Sentinel's embedded database (requires EnablePersistence=true to
+      survive task recreation). Set together with DatabaseUrlVarName.
+  DatabaseUrlVarName:
+    Type: String
+    Default: "POSTGRES_URL"
+    AllowedValues: ["POSTGRES_URL", "MYSQL_URL", "MARIADB_URL", "MSSQL_URL", "LIBSQL_URL"]
+    Description: Which env var DatabaseUrl is passed as - must match your database engine
+
+  # --- Secrets ---
+  # Sentinel auto-generates JWT_SECRET, ALTCHA_HMAC_SECRET, CODE_CHALLENGE_SECRET,
+  # EXOTDB_HMAC_SECRET and HASHING_SALT with random values if left unset - but
+  # that makes them unstable across redeploys, invalidating existing
+  # sessions/tokens every time the task restarts. Setting SECRET_SEED instead
+  # makes Sentinel derive all of those deterministically from this one value.
+  SecretSeed:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: (Optional) SECRET_SEED - deterministically derives the required secrets, kept stable across redeploys
+  NodeId:
+    Type: String
+    Default: ""
+    Description: (Optional) NODE_ID - unique node identifier
+
+  # --- Network/app settings ---
+  BaseUrl:
+    Type: String
+    Default: ""
+    Description: (Optional) BASE_URL - used for generating absolute URLs
+  AllowedHosts:
+    Type: String
+    Default: ""
+    Description: (Optional) ALLOWED_HOSTS - comma-separated hostnames (supports wildcards)
+
+  # --- Generic passthrough (for anything not covered above) ---
+  ExtraEnvName1:
+    Type: String
+    Default: ""
+  ExtraEnvValue1:
+    Type: String
+    Default: ""
+    NoEcho: true
+  ExtraEnvName2:
+    Type: String
+    Default: ""
+  ExtraEnvValue2:
+    Type: String
+    Default: ""
+    NoEcho: true
+  ExtraEnvName3:
+    Type: String
+    Default: ""
+  ExtraEnvValue3:
+    Type: String
+    Default: ""
+    NoEcho: true
+
 Conditions:
   HasCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   PersistenceEnabled: !Equals [!Ref EnablePersistence, "true"]
+  HasDatabaseUrl: !Not [!Equals [!Ref DatabaseUrl, ""]]
+  HasSecretSeed: !Not [!Equals [!Ref SecretSeed, ""]]
+  HasNodeId: !Not [!Equals [!Ref NodeId, ""]]
+  HasBaseUrl: !Not [!Equals [!Ref BaseUrl, ""]]
+  HasAllowedHosts: !Not [!Equals [!Ref AllowedHosts, ""]]
+  HasExtraEnv1: !Not [!Equals [!Ref ExtraEnvName1, ""]]
+  HasExtraEnv2: !Not [!Equals [!Ref ExtraEnvName2, ""]]
+  HasExtraEnv3: !Not [!Equals [!Ref ExtraEnvName3, ""]]
 
 Resources:
   # --- Networking ---
@@ -322,6 +394,15 @@ Resources:
           Image: !Ref ImageURI
           PortMappings:
             - ContainerPort: 8080
+          Environment:
+            - !If [HasDatabaseUrl, {Name: !Ref DatabaseUrlVarName, Value: !Ref DatabaseUrl}, !Ref AWS::NoValue]
+            - !If [HasSecretSeed, {Name: SECRET_SEED, Value: !Ref SecretSeed}, !Ref AWS::NoValue]
+            - !If [HasNodeId, {Name: NODE_ID, Value: !Ref NodeId}, !Ref AWS::NoValue]
+            - !If [HasBaseUrl, {Name: BASE_URL, Value: !Ref BaseUrl}, !Ref AWS::NoValue]
+            - !If [HasAllowedHosts, {Name: ALLOWED_HOSTS, Value: !Ref AllowedHosts}, !Ref AWS::NoValue]
+            - !If [HasExtraEnv1, {Name: !Ref ExtraEnvName1, Value: !Ref ExtraEnvValue1}, !Ref AWS::NoValue]
+            - !If [HasExtraEnv2, {Name: !Ref ExtraEnvName2, Value: !Ref ExtraEnvValue2}, !Ref AWS::NoValue]
+            - !If [HasExtraEnv3, {Name: !Ref ExtraEnvName3, Value: !Ref ExtraEnvValue3}, !Ref AWS::NoValue]
           MountPoints: !If
             - PersistenceEnabled
             - - SourceVolume: efs-volume

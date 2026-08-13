@@ -48,6 +48,18 @@ aws cloudformation deploy \
 | `TaskCPU` | `2048` | CPU units (1024 = 1 vCPU) |
 | `TaskMemory` | `4096` | Memory in MiB |
 | `EnablePersistence` | `false` | Attach an EFS-backed volume (at `/data`) that survives task recreation |
+| `DatabaseUrl` | (empty) | Connection string for an external database |
+| `DatabaseUrlVarName` | `POSTGRES_URL` | Which env var `DatabaseUrl` is passed as - one of `POSTGRES_URL`, `MYSQL_URL`, `MARIADB_URL`, `MSSQL_URL`, `LIBSQL_URL` |
+| `SecretSeed` | (empty) | `SECRET_SEED` - deterministically derives `JWT_SECRET`, `ALTCHA_HMAC_SECRET`, `CODE_CHALLENGE_SECRET`, `EXOTDB_HMAC_SECRET` and `HASHING_SALT`, kept stable across redeploys |
+| `NodeId` | (empty) | `NODE_ID` - unique node identifier |
+| `BaseUrl` | (empty) | `BASE_URL` - used for generating absolute URLs |
+| `AllowedHosts` | (empty) | `ALLOWED_HOSTS` - comma-separated hostnames (supports wildcards) |
+| `ExtraEnvName1/2/3`, `ExtraEnvValue1/2/3` | (empty) | Up to 3 arbitrary additional env var name/value pairs |
+
+Any parameter left at its default (empty string) is simply not passed to the container — ALTCHA
+Sentinel falls back to its own defaults/auto-generated values for that variable. See ALTCHA's
+[environment variable reference](https://altcha.org/docs/v2/sentinel/advanced/env/) for the full list
+of variables it understands.
 
 ## Available Task Sizes
 
@@ -103,6 +115,47 @@ same time.
 This setup assumes a single task. Scaling `DesiredCount` beyond 1 would have every task share the
 same EFS mount and directory, which is unsafe for a local file-based database — use an external
 database instead if you need to run more than one task.
+
+## Environment Variables
+
+Pass container environment variables using `--parameter-overrides` on the same `aws cloudformation
+deploy` command as any other parameter. For example, to point ALTCHA Sentinel at an external Postgres
+database (and skip the EFS volume, since it's not needed once there's an external database):
+
+```bash
+aws cloudformation deploy \
+  --template-file altcha-sentinel-aws-ecs.yml \
+  --stack-name altcha-sentinel-stack \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      DatabaseUrl="postgresql://user:password@your-db-host:5432/altcha_sentinel" \
+      DatabaseUrlVarName=POSTGRES_URL
+```
+
+By default, Sentinel auto-generates its required secrets (`JWT_SECRET`, `ALTCHA_HMAC_SECRET`,
+`CODE_CHALLENGE_SECRET`, `EXOTDB_HMAC_SECRET`, `HASHING_SALT`) with random values on startup, which
+makes them unstable across redeploys and invalidates existing sessions/tokens every time the task
+restarts. Set `SecretSeed` to have Sentinel derive all of them deterministically from one fixed value
+instead:
+
+```bash
+aws cloudformation deploy \
+  --template-file altcha-sentinel-aws-ecs.yml \
+  --stack-name altcha-sentinel-stack \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides SecretSeed="$(openssl rand -hex 32)"
+```
+
+For anything not covered by a named parameter, use one of the three generic slots:
+
+```bash
+--parameter-overrides ExtraEnvName1=SOME_VAR ExtraEnvValue1=some-value
+```
+
+Parameters holding secrets (`DatabaseUrl`, `SecretSeed`, `ExtraEnvValue1/2/3`) are declared `NoEcho`,
+so CloudFormation masks them in the console and in `describe-stacks` output — but they are still
+passed to `deploy` as plain CLI arguments, which is worth knowing before running this from a shared
+shell history or CI log.
 
 ## Cleaning Up
 
