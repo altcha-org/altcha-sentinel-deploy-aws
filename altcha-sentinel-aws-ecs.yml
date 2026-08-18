@@ -94,6 +94,23 @@ Parameters:
     Default: "POSTGRES_URL"
     AllowedValues: ["POSTGRES_URL", "MYSQL_URL", "MARIADB_URL", "MSSQL_URL", "LIBSQL_URL"]
     Description: Which env var DatabaseUrl is passed as - must match your database engine
+  RedisUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: (Optional) REDIS_URL - connection string for an external Redis instance
+
+  # --- License ---
+  LicenseKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: (Optional) LICENSE_KEY
+  LicenseJson:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: (Optional) LICENSE_JSON
 
   # --- Secrets ---
   # Sentinel auto-generates JWT_SECRET, ALTCHA_HMAC_SECRET, CODE_CHALLENGE_SECRET,
@@ -149,6 +166,9 @@ Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   PersistenceEnabled: !Equals [!Ref EnablePersistence, "true"]
   HasDatabaseUrl: !Not [!Equals [!Ref DatabaseUrl, ""]]
+  HasRedisUrl: !Not [!Equals [!Ref RedisUrl, ""]]
+  HasLicenseKey: !Not [!Equals [!Ref LicenseKey, ""]]
+  HasLicenseJson: !Not [!Equals [!Ref LicenseJson, ""]]
   HasSecretSeed: !Not [!Equals [!Ref SecretSeed, ""]]
   HasNodeId: !Not [!Equals [!Ref NodeId, ""]]
   HasBaseUrl: !Not [!Equals [!Ref BaseUrl, ""]]
@@ -396,6 +416,9 @@ Resources:
             - ContainerPort: 8080
           Environment:
             - !If [HasDatabaseUrl, {Name: !Ref DatabaseUrlVarName, Value: !Ref DatabaseUrl}, !Ref AWS::NoValue]
+            - !If [HasRedisUrl, {Name: REDIS_URL, Value: !Ref RedisUrl}, !Ref AWS::NoValue]
+            - !If [HasLicenseKey, {Name: LICENSE_KEY, Value: !Ref LicenseKey}, !Ref AWS::NoValue]
+            - !If [HasLicenseJson, {Name: LICENSE_JSON, Value: !Ref LicenseJson}, !Ref AWS::NoValue]
             - !If [HasSecretSeed, {Name: SECRET_SEED, Value: !Ref SecretSeed}, !Ref AWS::NoValue]
             - !If [HasNodeId, {Name: NODE_ID, Value: !Ref NodeId}, !Ref AWS::NoValue]
             - !If [HasBaseUrl, {Name: BASE_URL, Value: !Ref BaseUrl}, !Ref AWS::NoValue]
